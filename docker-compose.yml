@@ -1,0 +1,117 @@
+include:
+  - ./docker-compose-base.yml
+# To ensure that the container processes the locally modified `service_conf.yaml.template` instead of the one included in its image, you need to mount the local `service_conf.yaml.template` to the container.
+services:
+  ragflow:
+    depends_on:
+      mysql:
+        condition: service_healthy
+    image: ${RAGFLOW_IMAGE}
+    container_name: ragflow-server
+    ports:
+      - 0.0.0.0:${SVR_HTTP_PORT}:9380
+      - 0.0.0.0:80:80
+      - 0.0.0.0:443:443
+      - 5678:5678
+      - 5679:5679
+      - 9382:9382
+    volumes:
+      - ./ragflow-logs:/ragflow/logs
+      - ./nginx/ragflow.conf:/etc/nginx/conf.d/ragflow.conf
+      - ./nginx/proxy.conf:/etc/nginx/proxy.conf
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ../history_data_agent:/ragflow/history_data_agent
+      - ./service_conf.yaml.template:/ragflow/conf/service_conf.yaml.template
+      - ./entrypoint.sh:/ragflow/entrypoint.sh
+    env_file: .env
+    environment:
+      - TZ=${TIMEZONE}
+      - HF_ENDPOINT=${HF_ENDPOINT-}
+      - MACOS=${MACOS-}
+    networks:
+      - ragflow
+    restart: on-failure
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  ollama:
+    container_name: ollama-server
+    image: ollama/ollama:latest
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - /mnt/data/ai/ollama:/root/.ollama
+    restart: unless-stopped
+    environment:
+      - TZ=${TIMEZONE}
+      - OLLAMA_HOST=0.0.0.0
+    networks:
+      - ragflow
+    # 给 Ollama 更多时间启动
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 30s
+      retries: 20
+      start_period: 60s
+
+  openwebui:
+    container_name: openwebui
+    image: ghcr.io/open-webui/open-webui:main
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - WEBUI_SECRET_KEY=ragflow-openwebui-secret-key-2024
+      - TZ=${TIMEZONE}
+      - WEBUI_HOST=0.0.0.0
+      - ENABLE_SIGNUP=true
+    ports:
+      - "0.0.0.0:3000:8080"
+    volumes:
+      - /mnt/data/ai/openwebui:/app/backend/data
+    depends_on:
+      - ollama
+    networks:
+      - ragflow
+    # 简化健康检查，避免因Ollama连接问题失败
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  n8n:
+    container_name: n8n
+    image: n8nio/n8n:latest
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=false
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - TZ=${TIMEZONE}
+      - N8N_PROTOCOL=http
+      - GENERIC_TIMEZONE=Asia/Shanghai
+      - N8N_SECURE_COOKIE=false  # 禁用安全cookie
+      - DB_TYPE=sqlite  # 明确指定数据库类型
+      - WEBHOOK_URL=https://localhost:5670
+      - OLLAMA_API=http://ollama:11434
+    ports:
+      - "0.0.0.0:5670:5678"
+    volumes:
+      - /mnt/data/ai/n8n:/home/node/.n8n
+    restart: unless-stopped
+    networks:
+      - ragflow
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+volumes:
+  ollama_data:
+    driver: local
+  openwebui_data:
+    driver: local
+  n8n_data:
+    driver: local
